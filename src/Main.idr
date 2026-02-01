@@ -273,18 +273,13 @@ stMain opts
                let context = finalDefs.gamma
                let propertyTestNS = NS (mkNamespace "Hedgehog.Internal.Property")
                let propertyTestRunnerNS = NS (mkNamespace "Hedgehog.Internal.Runner")
-               let propertyCheckFnName = propertyTestRunnerNS $ UN $ Basic "check"
-               propertyTestType <- getCon {vars=empty} EmptyFC finalDefs (propertyTestNS $ UN $ Basic "Property")
+               let propertyCheckFnName = propertyTestRunnerNS $ UN $ Basic "checkNamed"
+               let taggedPropertyName = propertyTestNS $ UN $ Basic "MkTagged"
                let propertyTestConstructorName = propertyTestNS $ UN $ Basic "property"
                let ttestNS = NS (mkNamespace "TTest")
                let ttestConstructorName = ttestNS $ UN $ Basic "MkTTest"
                let eqPropertyFnName = ttestNS $ UN $ Basic "EqProperty"
---                Just target <- lookupCtxtExact (ttestNS $ UN $ Basic "==>") context
---                  | Nothing => coreLift $ exitWith (ExitFailure 1)
                targetResolvedName <- resolved context (ttestNS $ UN $ Basic "==>")
---                Just assertTest <- lookupCtxtExact (ttestNS $ UN $ Basic "assertTest") context
---                  | Nothing => coreLift $ exitWith (ExitFailure 1)
---                assertTestResolvedName <- resolved context (ttestNS $ UN $ Basic "assertTest")
                ctxt <- get Arr @{context.content}
                x <- map catMaybes $ for (rangeFromTo 0 (max ctxt)) $ \idx => do
                       Just y <- coreLift (readArray ctxt idx)
@@ -296,18 +291,15 @@ stMain opts
                       let Just extraArgs = (findWithin targetResolvedName ty)
                         | Nothing => pure Nothing
                       let testName = show test.fullname
---                       extraArgNames <- show extraArgs
                       coreLift $ printLn extraArgs
                       testResolvedName <- resolved context test.fullname
                       let unsafePerformName = NS primIONS (UN $ Basic "unsafePerformIO")
                       unsafePerformIOResolvedName <- resolved context unsafePerformName
                       let eqProp : RawImp = apply (IVar EmptyFC eqPropertyFnName) [Explicit EmptyFC (IVar EmptyFC testResolvedName)]
                       let propertyTestFn : RawImp = apply (IVar EmptyFC propertyTestConstructorName) [eqProp] 
-                      let propertyCheckFn : RawImp = apply (IVar EmptyFC propertyCheckFnName) [propertyTestFn] 
+                      let taggedTestName : RawImp = apply (IVar EmptyFC taggedPropertyName) [IPrimVal EmptyFC (Str testName)]
+                      let propertyCheckFn : RawImp = apply (IVar EmptyFC propertyCheckFnName) [taggedTestName, propertyTestFn] 
                       let performFn : RawImp = apply (IVar EmptyFC unsafePerformIOResolvedName) [propertyCheckFn]
---                       let assertFn : RawImp = apply (IVar EmptyFC assertTestResolvedName) [Explicit EmptyFC (IPrimVal EmptyFC (Str testName)), Explicit EmptyFC (IVar EmptyFC testResolvedName)]
---                       let performFn : RawImp = apply (IVar EmptyFC unsafePerformIOResolvedName) [assertFn]
---                       unit <- getCon EmptyFC finalDefs (builtin "Unit")
                       bool <- getCon EmptyFC finalDefs (NS (preludeNS <.> (mkNamespace "Basics")) $ UN $ Basic "Bool")
                       tidx <- resolveName (UN $ Basic "[elaborator script]")
                       let glued = (gnf Env.empty bool)
