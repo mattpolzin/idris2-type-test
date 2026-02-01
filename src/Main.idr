@@ -292,10 +292,12 @@ stMain opts
                         | Nothing => pure Nothing
                       let testName = show test.fullname
                       coreLift $ printLn extraArgs
+                      let args : List RawImp = map (\a => (IPrimVal EmptyFC (Str "input-arg"))) extraArgs
                       testResolvedName <- resolved context test.fullname
                       let unsafePerformName = NS primIONS (UN $ Basic "unsafePerformIO")
                       unsafePerformIOResolvedName <- resolved context unsafePerformName
-                      let eqProp : RawImp = apply (IVar EmptyFC eqPropertyFnName) [Explicit EmptyFC (IVar EmptyFC testResolvedName)]
+                      let prop : RawImp = apply (IVar EmptyFC testResolvedName) args
+                      let eqProp : RawImp = apply (IVar EmptyFC eqPropertyFnName) [Explicit EmptyFC prop]
                       let propertyTestFn : RawImp = apply (IVar EmptyFC propertyTestConstructorName) [eqProp] 
                       let taggedTestName : RawImp = apply (IVar EmptyFC taggedPropertyName) [IPrimVal EmptyFC (Str testName)]
                       let propertyCheckFn : RawImp = apply (IVar EmptyFC propertyCheckFnName) [taggedTestName, propertyTestFn] 
