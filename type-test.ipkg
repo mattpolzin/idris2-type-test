@@ -14,9 +14,11 @@ langversion >= 0.8.0
 
 -- packages to add to search path
 depends = idris2
+        , hedgehog
 
 -- modules to install
--- modules =
+modules = Main
+        , TTest
 
 -- main file (i.e. file to load at REPL)
 main = Main
