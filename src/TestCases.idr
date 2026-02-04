@@ -20,11 +20,25 @@ compareAssignees (Just u) (Just a1) (Just a2) =
                      then LT
                      else EQ
 
+%hint
+unicodeGen : Gen String
+unicodeGen = string (linear 0 30) unicode
+
 test3 : (githubUser : String) -> compareAssignees (Just githubUser) Nothing (Just githubUser) ==> GT
 test3 g = MkTTest
 
-test1 : (the Integer 1) + 1 ==> 2
-test1 = MkTTest
+tmp : Property
+tmp = property $
+  let p = (forAll unicodeGen)
+      q = (p >>= (\s => EqProperty (test3 s)))
+  in q
 
-test2 : (the Integer 2) + 1 ==> 2
-test2 = MkTTest
+%hint
+int1000 : Gen Integer
+int1000 = integer $ constant 0 1000
+
+test1 : (n : Integer) -> n + 1 > 1 ==> True
+test1 n = MkTTest
+
+-- test2 : (the Integer 2) + 1 ==> 2
+-- test2 = MkTTest

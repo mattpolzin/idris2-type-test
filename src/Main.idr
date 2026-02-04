@@ -11,6 +11,7 @@ import Core.UnifyState
 import Core.Normalise.Eval
 import Core.Reflect
 import Core.Env
+import Core.TT
 
 import Idris.CommandLine
 import Idris.Env
@@ -28,6 +29,8 @@ import Idris.Doc.Display
 import TTImp.TTImp
 import TTImp.Elab
 import TTImp.Elab.Check
+import TTImp.Unelab
+import TTImp.Raw
 
 import IdrisPaths
 import System
@@ -161,8 +164,6 @@ typeOf (PrimVal fc constant@(PrT _)) = Just (IPrimVal fc constant)
 typeOf (PrimVal fc _) = Nothing
 typeOf (Erased fc why) = Nothing
 
--- nameOf t = trace "H: \{show t}" Nothing
-
 findWithin : {vars : _} -> (target : Name) -> (ty : Term vars) -> Maybe (List RawImp)
 findWithin t (Ref fc nt name) = if t == name then Just [] else Nothing
 findWithin t (Bind fc x (Pi fc1 rig pinfo ty) scope) = 
@@ -175,6 +176,88 @@ findWithin _ _ = Nothing
 toPaths : {root : _} -> Tree root -> IO (List String)
 toPaths tree =
   depthFirst (\x => map (toFilePath x ::) . force) tree (pure [])
+
+bindFnVar : RawImp
+bindFnVar =
+  let bindFnName = NS preludeNS $ UN $ Basic ">>="
+  in  (IVar EmptyFC bindFnName)
+
+mapFnVar : RawImp
+mapFnVar =
+  let mapFnName = NS preludeNS $ UN $ Basic "map"
+  in  (IVar EmptyFC mapFnName)
+
+argsInPropM : {auto c : Ref Ctxt Defs} ->
+              {auto m : Ref MD Metadata} ->
+              {auto u : Ref UST UState} ->
+              {auto s : Ref Syn SyntaxInfo} ->
+              {auto o : Ref ROpts REPLOpts} ->
+              List ClosedTerm ->
+              Core (List ClosedTerm)
+argsInPropM argTypes = for argTypes $ \argTy => do
+  let propertyTestNS = NS (mkNamespace "Hedgehog.Internal.Property")
+  let forAllFnName = propertyTestNS $ UN $ Basic "forAll"
+  tidx <- resolveName (UN $ Basic "[elaborator script]")
+  let propTFn = Ref EmptyFC Func (propertyTestNS $ UN $ Basic "PropertyT")
+  let glued = gnf Env.empty (apply EmptyFC propTFn [argTy])
+  let gen : RawImp = ISearch EmptyFC 2
+  let appGen : RawImp = apply (IVar EmptyFC forAllFnName) [gen]
+  checkTerm tidx InExpr [] (MkNested []) Env.empty appGen glued
+
+taggedPropertyVar : RawImp
+taggedPropertyVar = 
+  let propertyTestNS = NS (mkNamespace "Hedgehog.Internal.Property")
+      taggedPropertyName = propertyTestNS $ UN $ Basic "MkTagged"
+  in  (IVar EmptyFC taggedPropertyName)
+
+propertyCheckFnVar : RawImp
+propertyCheckFnVar =
+  let propertyTestRunnerNS = NS (mkNamespace "Hedgehog.Internal.Runner")
+      propertyCheckFnName = propertyTestRunnerNS $ UN $ Basic "checkNamed"
+  in  (IVar EmptyFC propertyCheckFnName)
+
+propertyTestFnVar : RawImp
+propertyTestFnVar =
+  let propertyTestNS = NS (mkNamespace "Hedgehog.Internal.Property")
+      propertyTestFnName = propertyTestNS $ UN $ Basic "property"
+  in  (IVar EmptyFC propertyTestFnName)
+
+eqPropertyFnVar : RawImp
+eqPropertyFnVar =
+  let ttestNS = NS (mkNamespace "TTest")
+      eqPropertyFnName = ttestNS $ UN $ Basic "EqProperty"
+  in  (IVar EmptyFC eqPropertyFnName)
+
+unsafePerformIOFnVar : RawImp
+unsafePerformIOFnVar =
+  let unsafePerformIOName = NS primIONS (UN $ Basic "unsafePerformIO")
+  in  (IVar EmptyFC unsafePerformIOName)
+
+record TestArg where
+  constructor MkTestArg
+  ty : ClosedTerm
+  -- ^ argument type
+  gen : ClosedTerm
+  -- ^ PropertyT a (generates an `a` in the PropertyT Monad)
+
+funcX : {auto c : Ref Ctxt Defs} -> RawImp -> Scope -> List TestArg -> Core RawImp
+funcX testFn scope [] = pure testFn
+funcX testFn scope [x] = do
+  argTy <- iRawToRawImp <$> unelab Env.empty x.ty
+  -- argTy : Type (a in this case)
+  arg <- iRawToRawImp <$> unelab Env.empty x.gen
+  -- arg : PropertyT a
+
+  let argName = mkFresh scope (UN $ Basic "testArg")
+  let lambda : RawImp = ILam EmptyFC top Explicit (Just argName) argTy (apply eqPropertyFnVar [apply testFn [IVar EmptyFC argName]])
+  let eqProp : RawImp = apply bindFnVar [arg, lambda]
+  pure $ eqProp
+funcX testFn scope (x :: xs) = do
+  -- f : a -> ... -> TTest x y
+  arg <- unelab Env.empty x.gen
+  -- arg : PropertyT a
+  f' <- funcX testFn scope xs
+  pure $ apply bindFnVar [iRawToRawImp arg, f']
 
 stMain : List CLOpt -> Core ()
 stMain opts
@@ -271,14 +354,8 @@ stMain opts
 
                finalDefs <- get Ctxt
                let context = finalDefs.gamma
-               let propertyTestNS = NS (mkNamespace "Hedgehog.Internal.Property")
-               let propertyTestRunnerNS = NS (mkNamespace "Hedgehog.Internal.Runner")
-               let propertyCheckFnName = propertyTestRunnerNS $ UN $ Basic "checkNamed"
-               let taggedPropertyName = propertyTestNS $ UN $ Basic "MkTagged"
-               let propertyTestConstructorName = propertyTestNS $ UN $ Basic "property"
                let ttestNS = NS (mkNamespace "TTest")
                let ttestConstructorName = ttestNS $ UN $ Basic "MkTTest"
-               let eqPropertyFnName = ttestNS $ UN $ Basic "EqProperty"
                targetResolvedName <- resolved context (ttestNS $ UN $ Basic "==>")
                ctxt <- get Arr @{context.content}
                x <- map catMaybes $ for (rangeFromTo 0 (max ctxt)) $ \idx => do
@@ -292,16 +369,35 @@ stMain opts
                         | Nothing => pure Nothing
                       let testName = show test.fullname
                       coreLift $ printLn extraArgs
-                      let args : List RawImp = map (\a => (IPrimVal EmptyFC (Str "input-arg"))) extraArgs
-                      testResolvedName <- resolved context test.fullname
-                      let unsafePerformName = NS primIONS (UN $ Basic "unsafePerformIO")
-                      unsafePerformIOResolvedName <- resolved context unsafePerformName
-                      let prop : RawImp = apply (IVar EmptyFC testResolvedName) args
-                      let eqProp : RawImp = apply (IVar EmptyFC eqPropertyFnName) [Explicit EmptyFC prop]
-                      let propertyTestFn : RawImp = apply (IVar EmptyFC propertyTestConstructorName) [eqProp] 
-                      let taggedTestName : RawImp = apply (IVar EmptyFC taggedPropertyName) [IPrimVal EmptyFC (Str testName)]
-                      let propertyCheckFn : RawImp = apply (IVar EmptyFC propertyCheckFnName) [taggedTestName, propertyTestFn] 
-                      let performFn : RawImp = apply (IVar EmptyFC unsafePerformIOResolvedName) [propertyCheckFn]
+
+                      argTypes : List ClosedTerm <- for extraArgs $ \arg => do
+                        tidx <- resolveName (UN $ Basic "[elaborator script]")
+                        let glued = gnf Env.empty (TType EmptyFC (UN $ Basic "Type"))
+                        checkTerm tidx InExpr [] (MkNested []) Env.empty arg glued
+                      
+                      argsInProp <- argsInPropM argTypes
+                      -- ^ now we've got List (PropertyT a) for list of arguments
+                      -- next up, we need to traverse that list to bind each under PropertyT
+                      let testArgs = zipWith MkTestArg argTypes argsInProp 
+                      
+                      eqProp <- funcX (IVar EmptyFC test.fullname) [] testArgs
+                      -- ^ PropertyT ()
+
+--                       let propertyTestNS = NS (mkNamespace "Hedgehog.Internal.Property")
+--                       let propTFn = Ref EmptyFC Func (propertyTestNS $ UN $ Basic "PropertyT")
+--                       unit <- getCon EmptyFC finalDefs (builtin "Unit")
+--                       let glued = gnf Env.empty (apply EmptyFC propTFn [unit])
+--                       tidx <- resolveName (UN $ Basic "[elaborator script]")
+--                       q <- checkTerm tidx InExpr [] (MkNested []) Env.empty eqProp glued
+                      
+--                       let args : List RawImp = map (\a => (IPrimVal EmptyFC (Str "input-arg"))) extraArgs
+--                       let prop : RawImp = apply (IVar EmptyFC test.fullname) args
+--                       let eqProp : RawImp = apply eqPropertyFnVar [Explicit EmptyFC prop]
+                      let propertyTestFn : RawImp = apply propertyTestFnVar [eqProp] 
+                      let taggedTestName : RawImp = apply taggedPropertyVar [IPrimVal EmptyFC (Str testName)]
+                      let propertyCheckFn : RawImp = apply propertyCheckFnVar [taggedTestName, propertyTestFn] 
+                      let performFn : RawImp = apply unsafePerformIOFnVar [propertyCheckFn]
+                      coreLift $ printLn performFn
                       bool <- getCon EmptyFC finalDefs (NS (preludeNS <.> (mkNamespace "Basics")) $ UN $ Basic "Bool")
                       tidx <- resolveName (UN $ Basic "[elaborator script]")
                       let glued = (gnf Env.empty bool)
