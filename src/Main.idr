@@ -150,7 +150,7 @@ checkVerbose (Verbose :: _) = True
 checkVerbose (_ :: xs) = checkVerbose xs
 
 typeOf : {vars : _} -> Term vars -> Maybe RawImp
-typeOf (Ref fc nt name) = Nothing
+typeOf (Ref fc nt name) = Just (IVar fc name)
 typeOf (Meta fc n i ts) = Nothing
 typeOf (Bind fc x b scope) = Nothing
 typeOf (TType fc n) = Nothing
@@ -166,6 +166,7 @@ typeOf (Erased fc why) = Nothing
 
 findWithin : {vars : _} -> (target : Name) -> (ty : Term vars) -> Maybe (List RawImp)
 findWithin t (Ref fc nt name) = if t == name then Just [] else Nothing
+findWithin t (Bind fc x (Let fc1 rig val ty) scope) = findWithin t scope
 findWithin t (Bind fc x (Pi fc1 rig pinfo ty) scope) = 
   case typeOf ty of
        Just x => (x ::) <$> findWithin t scope
@@ -192,9 +193,11 @@ argsInPropM : {auto c : Ref Ctxt Defs} ->
               {auto u : Ref UST UState} ->
               {auto s : Ref Syn SyntaxInfo} ->
               {auto o : Ref ROpts REPLOpts} ->
+              Context ->
+              (testName : String) ->
               List ClosedTerm ->
               Core (List ClosedTerm)
-argsInPropM argTypes = for argTypes $ \argTy => do
+argsInPropM context testName argTypes = for argTypes $ \argTy => do
   let propertyTestNS = NS (mkNamespace "Hedgehog.Internal.Property")
   let forAllFnName = propertyTestNS $ UN $ Basic "forAll"
   tidx <- resolveName (UN $ Basic "[elaborator script]")
@@ -202,7 +205,10 @@ argsInPropM argTypes = for argTypes $ \argTy => do
   let glued = gnf Env.empty (apply EmptyFC propTFn [argTy])
   let gen : RawImp = ISearch EmptyFC 2
   let appGen : RawImp = apply (IVar EmptyFC forAllFnName) [gen]
-  checkTerm tidx InExpr [] (MkNested []) Env.empty appGen glued
+  catch (checkTerm tidx InExpr [] (MkNested []) Env.empty appGen glued) $
+    \e => do argTypeNames <- traverse (full context) argTypes
+             coreLift $ putStrLn "Error generating arguments for \{testName}. Needed argument types: \{show argTypeNames}"
+             throw e
 
 taggedPropertyVar : RawImp
 taggedPropertyVar = 
@@ -241,23 +247,44 @@ record TestArg where
   -- ^ PropertyT a (generates an `a` in the PropertyT Monad)
 
 funcX : {auto c : Ref Ctxt Defs} -> RawImp -> Scope -> List TestArg -> Core RawImp
-funcX testFn scope [] = pure testFn
+funcX testFn scope [] = pure (apply eqPropertyFnVar [testFn])
 funcX testFn scope [x] = do
+  -- testFn : a -> x ==> y
+
+  argTy <- iRawToRawImp <$> unelab Env.empty x.ty
+  -- argTy : Type (a in this case)
+  arg <- iRawToRawImp <$> unelab Env.empty x.gen
+  -- arg : PropertyT a
+
+  let ivarOf : Name -> RawImp = IVar EmptyFC
+
+  let argName = mkFresh scope (UN $ Basic "testArg")
+  let lambda : RawImp = ILam EmptyFC 
+                             top
+                             Explicit
+                             (Just argName)
+                             argTy 
+                             (apply eqPropertyFnVar [apply testFn (ivarOf <$> reverse (argName :: scope))])
+  let eqProp : RawImp = apply bindFnVar [arg, lambda]
+  pure eqProp
+funcX testFn scope (x :: xs) = do
+  -- testFn : a -> ... -> x ==> y
+
   argTy <- iRawToRawImp <$> unelab Env.empty x.ty
   -- argTy : Type (a in this case)
   arg <- iRawToRawImp <$> unelab Env.empty x.gen
   -- arg : PropertyT a
 
   let argName = mkFresh scope (UN $ Basic "testArg")
-  let lambda : RawImp = ILam EmptyFC top Explicit (Just argName) argTy (apply eqPropertyFnVar [apply testFn [IVar EmptyFC argName]])
+  testFn' <- funcX testFn (argName :: scope) xs
+  let lambda : RawImp = ILam EmptyFC
+                             top
+                             Explicit
+                             (Just argName)
+                             argTy
+                             testFn'
   let eqProp : RawImp = apply bindFnVar [arg, lambda]
-  pure $ eqProp
-funcX testFn scope (x :: xs) = do
-  -- f : a -> ... -> TTest x y
-  arg <- unelab Env.empty x.gen
-  -- arg : PropertyT a
-  f' <- funcX testFn scope xs
-  pure $ apply bindFnVar [iRawToRawImp arg, f']
+  pure eqProp
 
 stMain : List CLOpt -> Core ()
 stMain opts
@@ -352,6 +379,7 @@ stMain opts
                  catch (do addImport (MkImport emptyFC False (nsAsModuleIdent ns') ns'); pure Nothing)
                        (\err => pure (Just err))
 
+               setAllPublic True
                finalDefs <- get Ctxt
                let context = finalDefs.gamma
                let ttestNS = NS (mkNamespace "TTest")
@@ -365,20 +393,23 @@ stMain opts
                       let False = test.fullname == ttestConstructorName
                         | True => pure Nothing
                       let ty = test.type
+--                       coreLift $ printLn $ !(full context ty)
                       let Just extraArgs = (findWithin targetResolvedName ty)
                         | Nothing => pure Nothing
                       let testName = show test.fullname
-                      coreLift $ printLn extraArgs
+--                       coreLift $ printLn extraArgs
 
                       argTypes : List ClosedTerm <- for extraArgs $ \arg => do
                         tidx <- resolveName (UN $ Basic "[elaborator script]")
                         let glued = gnf Env.empty (TType EmptyFC (UN $ Basic "Type"))
-                        checkTerm tidx InExpr [] (MkNested []) Env.empty arg glued
+                        catch (checkTerm tidx InExpr [] (MkNested []) Env.empty arg glued) $
+                          \e => do coreLift $ putStrLn "Error while determining argument types for \{testName}"
+                                   throw e
                       
-                      argsInProp <- argsInPropM argTypes
+                      argsInProp <- argsInPropM context testName argTypes
                       -- ^ now we've got List (PropertyT a) for list of arguments
-                      -- next up, we need to traverse that list to bind each under PropertyT
                       let testArgs = zipWith MkTestArg argTypes argsInProp 
+                      -- ^ zip arg generators and their generated types
                       
                       eqProp <- funcX (IVar EmptyFC test.fullname) [] testArgs
                       -- ^ PropertyT ()
@@ -390,14 +421,11 @@ stMain opts
 --                       tidx <- resolveName (UN $ Basic "[elaborator script]")
 --                       q <- checkTerm tidx InExpr [] (MkNested []) Env.empty eqProp glued
                       
---                       let args : List RawImp = map (\a => (IPrimVal EmptyFC (Str "input-arg"))) extraArgs
---                       let prop : RawImp = apply (IVar EmptyFC test.fullname) args
---                       let eqProp : RawImp = apply eqPropertyFnVar [Explicit EmptyFC prop]
                       let propertyTestFn : RawImp = apply propertyTestFnVar [eqProp] 
                       let taggedTestName : RawImp = apply taggedPropertyVar [IPrimVal EmptyFC (Str testName)]
                       let propertyCheckFn : RawImp = apply propertyCheckFnVar [taggedTestName, propertyTestFn] 
                       let performFn : RawImp = apply unsafePerformIOFnVar [propertyCheckFn]
-                      coreLift $ printLn performFn
+--                       coreLift $ printLn performFn
                       bool <- getCon EmptyFC finalDefs (NS (preludeNS <.> (mkNamespace "Basics")) $ UN $ Basic "Bool")
                       tidx <- resolveName (UN $ Basic "[elaborator script]")
                       let glued = (gnf Env.empty bool)
