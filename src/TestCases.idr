@@ -24,12 +24,16 @@ compareAssignees (Just u) (Just a1) (Just a2) =
 unicodeGen : Gen String
 unicodeGen = string (linear 0 30) unicode
 
-test0 : (githubUser : String) -> compareAssignees (Just githubUser) Nothing (Just githubUser) ==> GT
-test0 g = MkTTest
-
 %hint
 int1000 : Gen Integer
 int1000 = integer $ constant 0 1000
+
+%hint
+nat1000 : Gen Nat
+nat1000 = nat $ constant 0 1000
+
+test0 : (githubUser : String) -> compareAssignees (Just githubUser) Nothing (Just githubUser) ==> GT
+test0 g = MkTTest
 
 test1 : (n : Integer) -> n + 1 > 1 ==> True
 test1 n = MkTTest
@@ -37,16 +41,15 @@ test1 n = MkTTest
 test2 : (the Integer 2) + 1 ==> 2
 test2 = MkTTest
 
-%hint
-nat1000 : Gen Nat
-nat1000 = nat $ constant 0 1000
-
 namespace Tests1
 
   test3 : (x : Nat) -> (str : String) -> "\{show x}\{str}" ==> "2hi"
   test3 x y = MkTTest
 
-  test4 : (x : Nat) -> (y : Integer) -> (str : String) -> "\{show x}\{show y}\{str}" ==> (show x) ++ (show y) ++ str
+  test4 : (x : Nat)
+       -> (y : Integer)
+       -> (str : String)
+       -> "\{show x}\{show y}\{str}" ==> (show x) ++ (show y) ++ str
   test4 x y str = MkTTest
 
 test5 : (x : Nat) -> x + 2 > 1 ==> True

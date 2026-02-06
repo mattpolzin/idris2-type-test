@@ -2,7 +2,6 @@ module Main
 
 import Compiler.Common
 
-import Core.Binary
 import Core.Core
 import Core.Directory
 import Core.InitPrimitives
@@ -15,7 +14,6 @@ import Core.TT
 
 import Idris.CommandLine
 import Idris.Env
-import Idris.IDEMode.REPL
 import Idris.Package
 import Idris.ProcessIdr
 import Idris.REPL
@@ -30,7 +28,6 @@ import TTImp.TTImp
 import TTImp.Elab
 import TTImp.Elab.Check
 import TTImp.Unelab
-import TTImp.Raw
 
 import IdrisPaths
 import System
@@ -45,12 +42,10 @@ import Data.IOArray
 import Data.String
 import Data.List
 
-import Debug.Trace
-
-import Yaffle.Main
-
 import TTest
 import Hedgehog
+import TTImp.Vars
+import TTImp.Raw
 
 %default covering
 
@@ -109,40 +104,10 @@ updateEnv
               | Nothing => throw (InternalError "Can't get current directory")
          addLibDir cwd
 
-updateREPLOpts : {auto o : Ref ROpts REPLOpts} ->
-                 Core ()
-updateREPLOpts
-    = do ed <- coreLift $ idrisGetEnv "EDITOR"
-         whenJust ed $ \ e => update ROpts { editor := e }
-
-tryYaffle : List CLOpt -> Core Bool
-tryYaffle [] = pure False
-tryYaffle (Yaffle f :: _) = do yaffleMain f []
-                               pure True
-tryYaffle (c :: cs) = tryYaffle cs
-
 ignoreMissingIpkg : List CLOpt -> Bool
 ignoreMissingIpkg [] = False
 ignoreMissingIpkg (IgnoreMissingIPKG :: _) = True
 ignoreMissingIpkg (c :: cs) = ignoreMissingIpkg cs
-
-tryTTM : List CLOpt -> Core Bool
-tryTTM [] = pure False
-tryTTM (Metadata f :: _) = do dumpTTM f
-                              pure True
-tryTTM (c :: cs) = tryTTM cs
-
-
-banner : String
-banner = #"""
-       ____    __     _         ___
-      /  _/___/ /____(_)____   |__ \
-      / // __  / ___/ / ___/   __/ /     Version \#{ showVersion True version }
-    _/ // /_/ / /  / (__  )   / __/      https://www.idris-lang.org
-   /___/\__,_/_/  /_/____/   /____/      Type :? for help
-
-  Welcome to Idris 2.  Enjoy yourself!
-  """#
 
 checkVerbose : List CLOpt -> Bool
 checkVerbose [] = False
@@ -174,19 +139,15 @@ findWithin t (Bind fc x (Pi fc1 rig pinfo ty) scope) =
 findWithin t (App fc fn arg) = findWithin t fn
 findWithin _ _ = Nothing
 
-toPaths : {root : _} -> Tree root -> IO (List String)
-toPaths tree =
-  depthFirst (\x => map (toFilePath x ::) . force) tree (pure [])
+tTestTypeName : Name
+tTestTypeName =
+  let ttestNS = NS (mkNamespace "TTest")
+  in  ttestNS $ UN $ Basic "==>"
 
-bindFnVar : RawImp
-bindFnVar =
-  let bindFnName = NS preludeNS $ UN $ Basic ">>="
-  in  (IVar EmptyFC bindFnName)
-
-mapFnVar : RawImp
-mapFnVar =
-  let mapFnName = NS preludeNS $ UN $ Basic "map"
-  in  (IVar EmptyFC mapFnName)
+tTestConstructorName : Name
+tTestConstructorName =
+  let ttestNS = NS (mkNamespace "TTest")
+  in  ttestNS $ UN $ Basic "MkTTest"
 
 argsInPropM : {auto c : Ref Ctxt Defs} ->
               {auto m : Ref MD Metadata} ->
@@ -210,35 +171,6 @@ argsInPropM context testName argTypes = for argTypes $ \argTy => do
              coreLift $ putStrLn "Error generating arguments for \{testName}. Needed argument types: \{show argTypeNames}"
              throw e
 
-taggedPropertyVar : RawImp
-taggedPropertyVar = 
-  let propertyTestNS = NS (mkNamespace "Hedgehog.Internal.Property")
-      taggedPropertyName = propertyTestNS $ UN $ Basic "MkTagged"
-  in  (IVar EmptyFC taggedPropertyName)
-
-propertyCheckFnVar : RawImp
-propertyCheckFnVar =
-  let propertyTestRunnerNS = NS (mkNamespace "Hedgehog.Internal.Runner")
-      propertyCheckFnName = propertyTestRunnerNS $ UN $ Basic "checkNamed"
-  in  (IVar EmptyFC propertyCheckFnName)
-
-propertyTestFnVar : RawImp
-propertyTestFnVar =
-  let propertyTestNS = NS (mkNamespace "Hedgehog.Internal.Property")
-      propertyTestFnName = propertyTestNS $ UN $ Basic "property"
-  in  (IVar EmptyFC propertyTestFnName)
-
-eqPropertyFnVar : RawImp
-eqPropertyFnVar =
-  let ttestNS = NS (mkNamespace "TTest")
-      eqPropertyFnName = ttestNS $ UN $ Basic "EqProperty"
-  in  (IVar EmptyFC eqPropertyFnName)
-
-unsafePerformIOFnVar : RawImp
-unsafePerformIOFnVar =
-  let unsafePerformIOName = NS primIONS (UN $ Basic "unsafePerformIO")
-  in  (IVar EmptyFC unsafePerformIOName)
-
 record TestArg where
   constructor MkTestArg
   ty : ClosedTerm
@@ -246,9 +178,9 @@ record TestArg where
   gen : ClosedTerm
   -- ^ PropertyT a (generates an `a` in the PropertyT Monad)
 
-funcX : {auto c : Ref Ctxt Defs} -> RawImp -> Scope -> List TestArg -> Core RawImp
-funcX testFn scope [] = pure (apply eqPropertyFnVar [testFn])
-funcX testFn scope [x] = do
+propFn : {auto c : Ref Ctxt Defs} -> RawImp -> Scope -> List TestArg -> Core RawImp
+propFn testFn scope [] = pure (apply eqPropertyFnVar [testFn])
+propFn testFn scope [x] = do
   -- testFn : a -> x ==> y
 
   argTy <- iRawToRawImp <$> unelab Env.empty x.ty
@@ -267,7 +199,8 @@ funcX testFn scope [x] = do
                              (apply eqPropertyFnVar [apply testFn (ivarOf <$> reverse (argName :: scope))])
   let eqProp : RawImp = apply bindFnVar [arg, lambda]
   pure eqProp
-funcX testFn scope (x :: xs) = do
+
+propFn testFn scope (x :: xs) = do
   -- testFn : a -> ... -> x ==> y
 
   argTy <- iRawToRawImp <$> unelab Env.empty x.ty
@@ -276,7 +209,7 @@ funcX testFn scope (x :: xs) = do
   -- arg : PropertyT a
 
   let argName = mkFresh scope (UN $ Basic "testArg")
-  testFn' <- funcX testFn (argName :: scope) xs
+  testFn' <- propFn testFn (argName :: scope) xs
   let lambda : RawImp = ILam EmptyFC
                              top
                              Explicit
@@ -286,13 +219,31 @@ funcX testFn scope (x :: xs) = do
   let eqProp : RawImp = apply bindFnVar [arg, lambda]
   pure eqProp
 
+handleOpts : {auto c : Ref Ctxt Defs} -> List CLOpt -> Core ()
+handleOpts (SetCG e :: opts)
+    = do defs <- get Ctxt
+         case getCG (options defs) e of
+            Just cg => do setCG cg
+                          handleOpts opts
+            Nothing =>
+              do coreLift $ putStrLn "No such code generator"
+                 coreLift $ putStrLn $ "Code generators available: " ++
+                                 showSep ", " (map fst (availableCGs (options defs)))
+                 coreLift $ exitWith (ExitFailure 1)
+handleOpts (PkgPath p :: opts)
+    = do addPkgDir p anyBounds
+         handleOpts opts
+handleOpts (SourceDir d :: opts)
+    = do setSourceDir (Just d)
+         handleOpts opts
+handleOpts (FindIPKG :: opts)
+    = do setSession ({ findipkg := True } !getSession)
+         handleOpts opts
+handleOpts _ = pure ()
+
 stMain : List CLOpt -> Core ()
 stMain opts
-    = do False <- tryYaffle opts
-            | True => pure ()
-         False <- tryTTM opts
-            | True => pure ()
-         defs <- initDefs
+    = do defs <- initDefs
          c <- newRef Ctxt defs
          s <- newRef Syn initSyntax
          setCG {c} Chez
@@ -302,9 +253,7 @@ stMain opts
          when (ignoreMissingIpkg opts) $
             setSession ({ ignoreMissingPkg := True } !getSession)
 
-         let ide = ideMode opts
-         let ideSocket = ideModeSocket opts
-         let outmode = if ide then IDEMode 0 stdin stdout else REPL InfoLvl
+         let outmode = REPL InfoLvl
          o <- newRef ROpts (REPL.Opts.defaultOpts Nothing outmode [])
          updateEnv
          fname <- case (findInputs opts) of
@@ -320,30 +269,17 @@ stMain opts
                                      """
          update ROpts { mainfile := fname }
 
-         -- start by going over the pre-options, and stop if we do not need to
-         -- continue
-         True <- preOptions opts
-            | False => pure ()
-
-         -- If there's a --build or --install, just do that then quit
-         _ <- flip catch quitWithError $ processPackageOpts opts
+         handleOpts opts
 
          flip catch quitWithError $
-            do when (checkVerbose opts) $ -- override Quiet if implicitly set
-                   setOutput (REPL InfoLvl)
-               u <- newRef UST initUState
+            do u <- newRef UST initUState
                origin <- maybe
                  (pure $ Virtual Interactive) (\fname => do
                    modIdent <- ctxtPathToNS fname
                    pure (PhysicalIdrSrc modIdent)
                    ) fname
                m <- newRef MD (initMetadata origin)
-               updateREPLOpts
-               Just cg <- getCG Chez
-                 | Nothing => coreLift $ exitWith (ExitFailure 1)
                session <- getSession
-               when (not $ nobanner session) $ do
-                 iputStrLn $ pretty0 banner
                fname <- if findipkg session
                            then findIpkg fname
                            else pure fname
@@ -358,80 +294,54 @@ stMain opts
                                 displayStartupErrors res
                                 pure res
 
-               doRepl <- catch (postOptions result opts)
-                               (\err => emitError err *> pure False)
-
-               defs <- get Ctxt
-               let package = "hedgehog"
-               searchDirs <- extraSearchDirectories
-               let Just packageDir = find
-                     (\d => isInfixOf package (fromMaybe d $ fileName =<< parent d))
-                     searchDirs
-                 | _ => coreLift $ exitWith (ExitFailure 1)
-               let packageDirPath = parse packageDir
-               tree <- coreLift $ explore packageDirPath
-               fentries <- coreLift $ toPaths (toRelative tree)
-               errs <- for fentries $ \entry => do
-                 let entry' = dropExtensions entry
-                 let sp = forget $ split (== dirSeparator) entry'
-                 let ns = concat $ intersperse "." sp
-                 let ns' = mkNamespace ns
-                 catch (do addImport (MkImport emptyFC False (nsAsModuleIdent ns') ns'); pure Nothing)
-                       (\err => pure (Just err))
+               ignore $ catch (postOptions result opts)
+                              (\err => emitError err *> pure False)
 
                setAllPublic True
                finalDefs <- get Ctxt
                let context = finalDefs.gamma
-               let ttestNS = NS (mkNamespace "TTest")
-               let ttestConstructorName = ttestNS $ UN $ Basic "MkTTest"
-               targetResolvedName <- resolved context (ttestNS $ UN $ Basic "==>")
+               targetResolvedName <- resolved context tTestTypeName
                ctxt <- get Arr @{context.content}
-               x <- map catMaybes $ for (rangeFromTo 0 (max ctxt)) $ \idx => do
-                      Just y <- coreLift (readArray ctxt idx)
-                        | Nothing => pure Nothing
-                      test <- decode context idx True y
-                      let False = test.fullname == ttestConstructorName
-                        | True => pure Nothing
-                      let ty = test.type
---                       coreLift $ printLn $ !(full context ty)
-                      let Just extraArgs = (findWithin targetResolvedName ty)
-                        | Nothing => pure Nothing
-                      let testName = show test.fullname
---                       coreLift $ printLn extraArgs
+               for_ (rangeFromTo 0 (max ctxt)) $ \idx => do
+                  Just y <- coreLift (readArray ctxt idx)
+                    | Nothing => pure ()
+                  test <- decode context idx True y
+                  let False = test.fullname == tTestConstructorName
+                    | True => pure ()
+                  let ty = test.type
+--                   coreLift $ printLn $ !(full context ty)
+                  let Just extraArgs = (findWithin targetResolvedName ty)
+                    | Nothing => pure ()
+                  let testName = show test.fullname
+--                   coreLift $ printLn extraArgs
 
-                      argTypes : List ClosedTerm <- for extraArgs $ \arg => do
-                        tidx <- resolveName (UN $ Basic "[elaborator script]")
-                        let glued = gnf Env.empty (TType EmptyFC (UN $ Basic "Type"))
-                        catch (checkTerm tidx InExpr [] (MkNested []) Env.empty arg glued) $
-                          \e => do coreLift $ putStrLn "Error while determining argument types for \{testName}"
-                                   throw e
-                      
-                      argsInProp <- argsInPropM context testName argTypes
-                      -- ^ now we've got List (PropertyT a) for list of arguments
-                      let testArgs = zipWith MkTestArg argTypes argsInProp 
-                      -- ^ zip arg generators and their generated types
-                      
-                      eqProp <- funcX (IVar EmptyFC test.fullname) [] testArgs
-                      -- ^ PropertyT ()
-
---                       let propertyTestNS = NS (mkNamespace "Hedgehog.Internal.Property")
---                       let propTFn = Ref EmptyFC Func (propertyTestNS $ UN $ Basic "PropertyT")
---                       unit <- getCon EmptyFC finalDefs (builtin "Unit")
---                       let glued = gnf Env.empty (apply EmptyFC propTFn [unit])
---                       tidx <- resolveName (UN $ Basic "[elaborator script]")
---                       q <- checkTerm tidx InExpr [] (MkNested []) Env.empty eqProp glued
-                      
-                      let propertyTestFn : RawImp = apply propertyTestFnVar [eqProp] 
-                      let taggedTestName : RawImp = apply taggedPropertyVar [IPrimVal EmptyFC (Str testName)]
-                      let propertyCheckFn : RawImp = apply propertyCheckFnVar [taggedTestName, propertyTestFn] 
-                      let performFn : RawImp = apply unsafePerformIOFnVar [propertyCheckFn]
---                       coreLift $ printLn performFn
-                      bool <- getCon EmptyFC finalDefs (NS (preludeNS <.> (mkNamespace "Basics")) $ UN $ Basic "Bool")
-                      tidx <- resolveName (UN $ Basic "[elaborator script]")
-                      let glued = (gnf Env.empty bool)
-                      r <- checkTerm tidx InExpr [] (MkNested []) Env.empty performFn glued
-                      execute cg r
-                      pure (Just test)
+                  argTypes : List ClosedTerm <- for extraArgs $ \arg => do
+                    tidx <- resolveName (UN $ Basic "[elaborator script]")
+                    let glued = gnf Env.empty (TType EmptyFC (UN $ Basic "Type"))
+                    catch (checkTerm tidx InExpr [] (MkNested []) Env.empty arg glued) $
+                      \e => do coreLift $ putStrLn "Error while determining argument types for \{testName}"
+                               throw e
+                  
+                  argsInProp <- argsInPropM context testName argTypes
+                  -- ^ now we've got List (PropertyT a) for list of arguments
+                  let testArgs = zipWith MkTestArg argTypes argsInProp 
+                  -- ^ zip arg generators and their generated types
+                  
+                  eqProp <- propFn (IVar EmptyFC test.fullname) [] testArgs
+                  -- ^ PropertyT ()
+                  
+                  let propertyTestFn : RawImp = apply propertyTestFnVar [eqProp] 
+                  let taggedTestName : RawImp = apply taggedPropertyVar [IPrimVal EmptyFC (Str testName)]
+                  let propertyCheckFn : RawImp = apply propertyCheckFnVar [taggedTestName, propertyTestFn] 
+                  let performFn : RawImp = apply unsafePerformIOFnVar [propertyCheckFn]
+--                   coreLift $ printLn performFn
+                  bool <- getCon EmptyFC finalDefs (NS (preludeNS <.> (mkNamespace "Basics")) $ UN $ Basic "Bool")
+                  tidx <- resolveName (UN $ Basic "[elaborator script]")
+                  let glued = (gnf Env.empty bool)
+                  r <- checkTerm tidx InExpr [] (MkNested []) Env.empty performFn glued
+                  Just cg <- findCG
+                    | Nothing => coreLift $ exitWith (ExitFailure 1)
+                  execute cg r
                pure ()
 
   where
@@ -448,34 +358,14 @@ stMain opts
 -- Run any options (such as --version or --help) which imply printing a
 -- message then exiting. Returns wheter the program should continue
 
-quitOpts : List CLOpt -> IO Bool
-quitOpts [] = pure True
-quitOpts (Version :: _)
-    = do putStrLn versionMsg
-         pure False
-quitOpts (TTCVersion :: _)
-    = do printLn ttcVersion
-         pure False
-quitOpts (Help Nothing :: _)
-    = do putStrLn usage
-         pure False
-quitOpts (Help (Just HelpLogging) :: _)
-    = do putStrLn helpTopics
-         pure False
-quitOpts (Help (Just HelpPragma) :: _)
-    = do putStrLn pragmaTopics
-         pure False
-quitOpts (_ :: opts) = quitOpts opts
-
 main : IO ()
 main = do
   Right opts <- getCmdOpts
     | Left err => do ignore $ fPutStrLn stderr $ "Error: " ++ err
                      exitWith (ExitFailure 1)
-  continue <- quitOpts opts
-  when continue $ do
-    setupTerm
-    coreRun (stMain opts)
-      (\err : Error => do ignore $ fPutStrLn stderr $ "Uncaught error: " ++ show err
-                          exitWith (ExitFailure 1))
-      (\res => pure ())
+  
+  setupTerm
+  coreRun (stMain opts)
+    (\err : Error => do ignore $ fPutStrLn stderr $ "Uncaught error: " ++ show err
+                        exitWith (ExitFailure 1))
+    (\res => pure ())
