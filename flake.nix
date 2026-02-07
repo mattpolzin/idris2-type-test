@@ -29,7 +29,7 @@
     in
     {
       packages = forEachSystem (
-        { buildIdris', ... }:
+        { buildIdris', idris2, pkgs, idris2Packages, ... }:
         {
           default = buildIdris' {
             ipkgName = "type-test";
@@ -37,6 +37,29 @@
             extraIdrisLibraries = [
               # idris2Packages.packdb.ncurses-idris
             ];
+    postInstall =
+      let
+        name = "${idris2.pname}-${idris2.version}";
+        idris2Support = idris2.passthru.idris2Support;
+        globalLibraries = [
+          "\\$HOME/.nix-profile/lib/${name}"
+          "/run/current-system/sw/lib/${name}"
+          "${idris2}/${name}"
+        ];
+        globalLibrariesPath = builtins.concatStringsSep ":" globalLibraries;
+        supportLibrariesPath = lib.makeLibraryPath [ idris2Support ];
+        supportSharePath = lib.makeSearchPath "share" [ idris2Support ];
+      in
+      ''
+        wrapProgram "$out/bin/type-test" \
+          --set-default CHEZ "${lib.getExe pkgs.chez}" \
+          --run 'export IDRIS2_PREFIX=''${IDRIS2_PREFIX-"$HOME/.idris2"}' \
+          --suffix IDRIS2_LIBS ':' "${supportLibrariesPath}" \
+          --suffix IDRIS2_DATA ':' "${supportSharePath}" \
+          --suffix IDRIS2_PACKAGE_PATH ':' "${globalLibrariesPath}" \
+          --suffix LD_LIBRARY_PATH ':' "${supportLibrariesPath}" \
+          --suffix DYLD_LIBRARY_PATH ':' "${supportLibrariesPath}" \
+      '';
           };
         }
       );

@@ -1,6 +1,6 @@
-package type-test
-version = 0.1.0
-authors = "Mathew Polzin"
+package inline-tests
+-- version =
+-- authors =
 -- maintainers =
 -- license =
 -- brief =
@@ -10,20 +10,20 @@ authors = "Mathew Polzin"
 -- bugtracker =
 
 -- the Idris2 version required (e.g. langversion >= 0.5.1)
-langversion >= 0.8.0
+-- langversion
 
 -- packages to add to search path
-depends = idris2
-        , hedgehog
+depends = hedgehog
+        , type-test
 
 -- modules to install
-modules = TTest
+modules = TestCases
 
 -- main file (i.e. file to load at REPL)
-main = Main
+-- main =
 
 -- name of executable
-executable = type-test
+-- executable =
 -- opts =
 sourcedir = "src"
 -- builddir =
