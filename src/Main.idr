@@ -49,11 +49,9 @@ import TTImp.Raw
 
 %default covering
 
-findInputs : List CLOpt -> Maybe (List1 String)
-findInputs [] = Nothing
-findInputs (InputFile f :: fs) =
-  let rest = maybe [] toList (findInputs fs)
-  in  Just (f ::: rest)
+findInputs : List CLOpt -> List String
+findInputs [] = []
+findInputs (InputFile f :: fs) = f :: findInputs fs
 findInputs (_ :: fs) = findInputs fs
 
 splitPaths : String -> List1 String
@@ -256,93 +254,82 @@ stMain opts
          let outmode = REPL InfoLvl
          o <- newRef ROpts (REPL.Opts.defaultOpts Nothing outmode [])
          updateEnv
-         fname <- case (findInputs opts) of
-                       Just (fname ::: Nil) => pure $ Just fname
-                       Nothing => pure Nothing
-                       Just (fname1 ::: fnames) => do
-                         let suggestion = nearMatchOptSuggestion fname1
-                         renderedSuggestion <- maybe (pure "") render suggestion
-                         quitWithError $
-                           UserError """
-                                     Expected at most one input file but was given: \{joinBy ", " (fname1 :: fnames)}
-                                     \{renderedSuggestion}
-                                     """
-         update ROpts { mainfile := fname }
+         let fnames = findInputs opts
 
-         handleOpts opts
+         for_ fnames $ \fname => do
+           let fname = Just fname
+           update ROpts { mainfile := fname }
 
-         flip catch quitWithError $
-            do u <- newRef UST initUState
-               origin <- maybe
-                 (pure $ Virtual Interactive) (\fname => do
-                   modIdent <- ctxtPathToNS fname
-                   pure (PhysicalIdrSrc modIdent)
-                   ) fname
-               m <- newRef MD (initMetadata origin)
-               session <- getSession
-               fname <- if findipkg session
-                           then findIpkg fname
-                           else pure fname
-               setMainFile fname
-               result <- case fname of
-                    Nothing => logTime 1 "Loading prelude" $ do
-                                 when (not $ noprelude session) $
-                                   readPrelude True
-                                 pure Done
-                    Just f => logTime 1 "Loading main file" $ do
-                                res <- loadMainFile f
-                                displayStartupErrors res
-                                pure res
+           handleOpts opts
 
-               ignore $ catch (postOptions result opts)
-                              (\err => emitError err *> pure False)
+           flip catch quitWithError $
+              do u <- newRef UST initUState
+                 origin <- maybe
+                   (pure $ Virtual Interactive) (\fname => do
+                     modIdent <- ctxtPathToNS fname
+                     pure (PhysicalIdrSrc modIdent)
+                     ) fname
+                 m <- newRef MD (initMetadata origin)
+                 session <- getSession
+                 fname <- if findipkg session
+                             then findIpkg fname
+                             else pure fname
+                 setMainFile fname
+                 result <- case fname of
+                      Nothing => logTime 1 "Loading prelude" $ do
+                                   when (not $ noprelude session) $
+                                     readPrelude True
+                                   pure Done
+                      Just f => logTime 1 "Loading main file" $ do
+                                  res <- loadMainFile f
+                                  displayStartupErrors res
+                                  pure res
 
-               setAllPublic True
-               finalDefs <- get Ctxt
-               let context = finalDefs.gamma
-               targetResolvedName <- resolved context tTestTypeName
-               ctxt <- get Arr @{context.content}
-               for_ (rangeFromTo 0 (max ctxt)) $ \idx => do
-                  Just y <- coreLift (readArray ctxt idx)
-                    | Nothing => pure ()
-                  test <- decode context idx True y
-                  let False = test.fullname == tTestConstructorName
-                    | True => pure ()
-                  let ty = test.type
---                   coreLift $ printLn $ !(full context ty)
-                  let Just extraArgs = (findWithin targetResolvedName ty)
-                    | Nothing => pure ()
-                  let testName = show test.fullname
---                   coreLift $ printLn extraArgs
+                 ignore $ catch (postOptions result opts)
+                                (\err => emitError err *> pure False)
 
-                  argTypes : List ClosedTerm <- for extraArgs $ \arg => do
+                 setAllPublic True
+                 finalDefs <- get Ctxt
+                 let context = finalDefs.gamma
+                 targetResolvedName <- resolved context tTestTypeName
+                 ctxt <- get Arr @{context.content}
+                 for_ (rangeFromTo 0 (max ctxt)) $ \idx => do
+                    Just y <- coreLift (readArray ctxt idx)
+                      | Nothing => pure ()
+                    test <- decode context idx True y
+                    let False = test.fullname == tTestConstructorName
+                      | True => pure ()
+                    let ty = test.type
+                    let Just extraArgs = (findWithin targetResolvedName ty)
+                      | Nothing => pure ()
+                    let testName = show test.fullname
+
+                    argTypes : List ClosedTerm <- for extraArgs $ \arg => do
+                      tidx <- resolveName (UN $ Basic "[elaborator script]")
+                      let glued = gnf Env.empty (TType EmptyFC (UN $ Basic "Type"))
+                      catch (checkTerm tidx InExpr [] (MkNested []) Env.empty arg glued) $
+                        \e => do coreLift $ putStrLn "Error while determining argument types for \{testName}"
+                                 throw e
+                    
+                    argsInProp <- argsInPropM context testName argTypes
+                    -- ^ now we've got List (PropertyT a) for list of arguments
+                    let testArgs = zipWith MkTestArg argTypes argsInProp 
+                    -- ^ zip arg generators and their generated types
+                    
+                    eqProp <- propFn (IVar EmptyFC test.fullname) [] testArgs
+                    -- ^ PropertyT ()
+                    
+                    let propertyTestFn : RawImp = apply propertyTestFnVar [eqProp] 
+                    let taggedTestName : RawImp = apply taggedPropertyVar [IPrimVal EmptyFC (Str testName)]
+                    let propertyCheckFn : RawImp = apply propertyCheckFnVar [taggedTestName, propertyTestFn] 
+                    let performFn : RawImp = apply unsafePerformIOFnVar [propertyCheckFn]
+                    bool <- getCon EmptyFC finalDefs (NS (preludeNS <.> (mkNamespace "Basics")) $ UN $ Basic "Bool")
                     tidx <- resolveName (UN $ Basic "[elaborator script]")
-                    let glued = gnf Env.empty (TType EmptyFC (UN $ Basic "Type"))
-                    catch (checkTerm tidx InExpr [] (MkNested []) Env.empty arg glued) $
-                      \e => do coreLift $ putStrLn "Error while determining argument types for \{testName}"
-                               throw e
-                  
-                  argsInProp <- argsInPropM context testName argTypes
-                  -- ^ now we've got List (PropertyT a) for list of arguments
-                  let testArgs = zipWith MkTestArg argTypes argsInProp 
-                  -- ^ zip arg generators and their generated types
-                  
-                  eqProp <- propFn (IVar EmptyFC test.fullname) [] testArgs
-                  -- ^ PropertyT ()
-                  
-                  let propertyTestFn : RawImp = apply propertyTestFnVar [eqProp] 
-                  let taggedTestName : RawImp = apply taggedPropertyVar [IPrimVal EmptyFC (Str testName)]
-                  let propertyCheckFn : RawImp = apply propertyCheckFnVar [taggedTestName, propertyTestFn] 
-                  let performFn : RawImp = apply unsafePerformIOFnVar [propertyCheckFn]
---                   coreLift $ printLn performFn
-                  bool <- getCon EmptyFC finalDefs (NS (preludeNS <.> (mkNamespace "Basics")) $ UN $ Basic "Bool")
-                  tidx <- resolveName (UN $ Basic "[elaborator script]")
-                  let glued = (gnf Env.empty bool)
-                  r <- checkTerm tidx InExpr [] (MkNested []) Env.empty performFn glued
-                  Just cg <- findCG
-                    | Nothing => coreLift $ exitWith (ExitFailure 1)
-                  execute cg r
-               pure ()
+                    let glued = (gnf Env.empty bool)
+                    r <- checkTerm tidx InExpr [] (MkNested []) Env.empty performFn glued
+                    Just cg <- findCG
+                      | Nothing => coreLift $ exitWith (ExitFailure 1)
+                    execute cg r
 
   where
 
