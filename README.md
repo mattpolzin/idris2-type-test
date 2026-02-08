@@ -1,4 +1,6 @@
 
+This project is very experimental. it may change in breaking ways and it may have bugs that make it unusable in situations I haven't tested yet.
+
 # type-test
 
 This is a fairly rudimentary attempt at the following goal: Write in-code
