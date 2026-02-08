@@ -17,9 +17,6 @@ depends = type-test-api
         , idris2
         , hedgehog
 
--- modules to install
-modules = TTest
-
 -- main file (i.e. file to load at REPL)
 main = Main
 
