@@ -1,4 +1,4 @@
-package type-test
+package type-test-api
 version = 0.1.0
 authors = "Mathew Polzin"
 -- maintainers =
@@ -13,18 +13,14 @@ authors = "Mathew Polzin"
 langversion >= 0.8.0
 
 -- packages to add to search path
-depends = type-test-api
-        , idris2
-        , hedgehog
+depends = hedgehog
 
 -- modules to install
 modules = TTest
 
 -- main file (i.e. file to load at REPL)
-main = Main
+main = TTest
 
--- name of executable
-executable = type-test
 -- opts =
 sourcedir = "src"
 -- builddir =

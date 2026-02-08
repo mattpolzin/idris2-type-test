@@ -30,7 +30,21 @@
     {
       packages = forEachSystem (
         { buildIdris, idris2, pkgs, idris2Packages, system, ... }:
-          let postInstall =
+          let api = buildIdris {
+              ipkgName = "type-test-api";
+              src = ./type-test-api;
+              idrisLibraries = [
+                idris2Packages.packdb.hedgehog
+              ];
+            };
+            pkg = buildIdris {
+            ipkgName = "type-test";
+            src = ./.;
+            idrisLibraries = [
+              api
+              idris2Packages.idris2Api
+            ];
+            postInstall =
               let
                 name = "${idris2.pname}-${idris2.version}";
                 idris2Support = idris2.passthru.idris2Support;
@@ -53,18 +67,11 @@
                   --suffix LD_LIBRARY_PATH ':' "${supportLibrariesPath}" \
                   --suffix DYLD_LIBRARY_PATH ':' "${supportLibrariesPath}" \
               '';
-            pkg = buildIdris {
-            ipkgName = "type-test";
-            src = ./.;
-            idrisLibraries = [
-              idris2Packages.packdb.hedgehog
-              idris2Packages.idris2Api
-            ];
           };
           in
         {
-          type-test = pkg.executable.overrideAttrs { inherit postInstall; };
-          type-testApi =  pkg.library';
+          type-test = pkg.executable;
+          type-testApi =  api.library';
           default =  self.packages.${system}.type-test;
         }
       );
