@@ -162,7 +162,7 @@ argsInPropM context testName argTypes = for argTypes $ \argTy => do
   tidx <- resolveName (UN $ Basic "[elaborator script]")
   let propTFn = Ref EmptyFC Func (propertyTestNS $ UN $ Basic "PropertyT")
   let glued = gnf Env.empty (apply EmptyFC propTFn [argTy])
-  let gen : RawImp = ISearch EmptyFC 2
+  let gen : RawImp = ISearch EmptyFC 100
   let appGen : RawImp = apply (IVar EmptyFC forAllFnName) [gen]
   catch (checkTerm tidx InExpr [] (MkNested []) Env.empty appGen glued) $
     \e => do argTypeNames <- traverse (full context) argTypes
