@@ -174,7 +174,7 @@ record TestArg where
   ty : ClosedTerm
   -- ^ argument type
   gen : ClosedTerm
-  -- ^ PropertyT a (generates an `a` in the PropertyT Monad)
+  -- ^ PropertyT a -- generates an `a` in the PropertyT Monad
 
 propFn : {auto c : Ref Ctxt Defs} -> RawImp -> Scope -> List TestArg -> Core RawImp
 propFn testFn scope [] = pure (apply eqPropertyFnVar [testFn])
@@ -293,43 +293,51 @@ stMain opts
                  let context = finalDefs.gamma
                  targetResolvedName <- resolved context tTestTypeName
                  ctxt <- get Arr @{context.content}
-                 for_ (rangeFromTo 0 (max ctxt)) $ \idx => do
-                    Just y <- coreLift (readArray ctxt idx)
-                      | Nothing => pure ()
-                    test <- decode context idx True y
-                    let False = test.fullname == tTestConstructorName
-                      | True => pure ()
-                    let ty = test.type
-                    let Just extraArgs = (findWithin targetResolvedName ty)
-                      | Nothing => pure ()
-                    let testName = show test.fullname
+                 testTerms : List (Maybe ClosedTerm) <-
+                   for (rangeFromTo 0 (max ctxt)) $ \idx => do
+                      Just y <- coreLift (readArray ctxt idx)
+                        | Nothing => pure Nothing
+                      test <- decode context idx True y
+                      let False = test.fullname == tTestConstructorName
+                        | True => pure Nothing
+                      let ty = test.type
+                      let Just extraArgs = (findWithin targetResolvedName ty)
+                        | Nothing => pure Nothing
+                      let testName = show test.fullname
 
-                    argTypes : List ClosedTerm <- for extraArgs $ \arg => do
+                      argTypes : List ClosedTerm <- for extraArgs $ \arg => do
+                        tidx <- resolveName (UN $ Basic "[elaborator script]")
+                        let glued = gnf Env.empty (TType EmptyFC (UN $ Basic "Type"))
+                        catch (checkTerm tidx InExpr [] (MkNested []) Env.empty arg glued) $
+                          \e => do coreLift $ putStrLn "Error while determining argument types for \{testName}"
+                                   throw e
+                      
+                      argsInProp <- argsInPropM context testName argTypes
+                      -- ^ now we've got List (PropertyT a) for list of arguments
+                      let testArgs = zipWith MkTestArg argTypes argsInProp 
+                      -- ^ zip arg generators and their generated types
+                      
+                      eqProp <- propFn (IVar EmptyFC test.fullname) [] testArgs
+                      -- ^ PropertyT ()
+                      
+                      let propertyTestFn : RawImp = apply propertyTestFnVar [eqProp] 
+                      let taggedTestName : RawImp = apply taggedPropertyVar [IPrimVal EmptyFC (Str testName)]
+                      let propertyCheckFn : RawImp = apply propertyCheckFnVar [taggedTestName, propertyTestFn] 
+                      let performFn : RawImp = apply unsafePerformIOFnVar [propertyCheckFn]
+                      bool <- getCon EmptyFC finalDefs (NS (preludeNS <.> (mkNamespace "Basics")) $ UN $ Basic "Bool")
                       tidx <- resolveName (UN $ Basic "[elaborator script]")
-                      let glued = gnf Env.empty (TType EmptyFC (UN $ Basic "Type"))
-                      catch (checkTerm tidx InExpr [] (MkNested []) Env.empty arg glued) $
-                        \e => do coreLift $ putStrLn "Error while determining argument types for \{testName}"
-                                 throw e
-                    
-                    argsInProp <- argsInPropM context testName argTypes
-                    -- ^ now we've got List (PropertyT a) for list of arguments
-                    let testArgs = zipWith MkTestArg argTypes argsInProp 
-                    -- ^ zip arg generators and their generated types
-                    
-                    eqProp <- propFn (IVar EmptyFC test.fullname) [] testArgs
-                    -- ^ PropertyT ()
-                    
-                    let propertyTestFn : RawImp = apply propertyTestFnVar [eqProp] 
-                    let taggedTestName : RawImp = apply taggedPropertyVar [IPrimVal EmptyFC (Str testName)]
-                    let propertyCheckFn : RawImp = apply propertyCheckFnVar [taggedTestName, propertyTestFn] 
-                    let performFn : RawImp = apply unsafePerformIOFnVar [propertyCheckFn]
-                    bool <- getCon EmptyFC finalDefs (NS (preludeNS <.> (mkNamespace "Basics")) $ UN $ Basic "Bool")
-                    tidx <- resolveName (UN $ Basic "[elaborator script]")
-                    let glued = (gnf Env.empty bool)
-                    r <- checkTerm tidx InExpr [] (MkNested []) Env.empty performFn glued
-                    Just cg <- findCG
-                      | Nothing => coreLift $ exitWith (ExitFailure 1)
-                    execute cg r
+                      let glued = (gnf Env.empty bool)
+                      Just <$> checkTerm tidx InExpr [] (MkNested []) Env.empty performFn glued
+                      -- ^ Bool under unsafePerformIO
+
+                 -- TODO: Given list of ClosedTerm (bools, we know), apply
+                 -- function that exits non-zero if any of those bools is
+                 -- false.
+                 true <- getCon EmptyFC finalDefs (NS (preludeNS <.> (mkNamespace "Basics")) $ UN $ Basic "True")
+                 r <- ?h $ catMaybes testTerms
+                 Just cg <- findCG
+                   | Nothing => coreLift $ exitWith (ExitFailure 1)
+                 execute cg r
 
   where
 
@@ -341,9 +349,6 @@ stMain opts
     doc <- display err
     msg <- render doc
     coreLift (die msg)
-
--- Run any options (such as --version or --help) which imply printing a
--- message then exiting. Returns wheter the program should continue
 
 main : IO ()
 main = do
