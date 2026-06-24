@@ -32,26 +32,26 @@ int1000 = integer $ constant 0 1000
 nat1000 : Gen Nat
 nat1000 = nat $ constant 0 1000
 
-test0 : (githubUser : String) -> compareAssignees (Just githubUser) Nothing (Just githubUser) ==> GT
-test0 g = MkTTest
+good_test0 : (githubUser : String) -> compareAssignees (Just githubUser) Nothing (Just githubUser) ==> GT
+good_test0 g = MkTTest
 
-test1 : (n : Integer) -> n + 1 > 1 ==> True
-test1 n = MkTTest
+bad_test1 : (n : Integer) -> n + 1 > 1 ==> True
+bad_test1 n = MkTTest
 
-test2 : (the Integer 2) + 1 ==> 2
-test2 = MkTTest
+bad_test2 : (the Integer 2) + 1 ==> 2
+bad_test2 = MkTTest
 
 namespace Tests1
 
-  test3 : (x : Nat) -> (str : String) -> "\{show x}\{str}" ==> "2hi"
-  test3 x y = MkTTest
+  bad_test3 : (x : Nat) -> (str : String) -> "\{show x}\{str}" ==> "2hi"
+  bad_test3 x y = MkTTest
 
-  test4 : (x : Nat)
+  good_test4 : (x : Nat)
        -> (y : Integer)
        -> (str : String)
        -> "\{show x}\{show y}\{str}" ==> (show x) ++ (show y) ++ str
-  test4 x y str = MkTTest
+  good_test4 x y str = MkTTest
 
-test5 : (x : Nat) -> x + 2 > 1 ==> True
-test5 x = MkTTest
+good_test5 : (x : Nat) -> x + 2 > 1 ==> True
+good_test5 x = MkTTest
 

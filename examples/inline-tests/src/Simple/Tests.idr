@@ -14,6 +14,6 @@ unicodeGen = string (linear 0 30) unicode
 int1000 : Gen Integer
 int1000 = integer $ constant 0 1000
 
-operationTest1 : (str : String) -> (i : Integer) -> head' (words (operation str i)) ==> Just str
-operationTest1 str i = MkTTest
+bad_operationTest1 : (str : String) -> (i : Integer) -> head' (words (operation str i)) ==> Just str
+bad_operationTest1 str i = MkTTest
 
