@@ -43,9 +43,12 @@ import Data.String
 import Data.List
 
 import TTest
+import TTest.Core
+import TTest.Locate
 import Hedgehog
 import TTImp.Vars
 import TTImp.Raw
+import OptionHandling
 
 %default covering
 
@@ -102,143 +105,6 @@ updateEnv
               | Nothing => throw (InternalError "Can't get current directory")
          addLibDir cwd
 
-ignoreMissingIpkg : List CLOpt -> Bool
-ignoreMissingIpkg [] = False
-ignoreMissingIpkg (IgnoreMissingIPKG :: _) = True
-ignoreMissingIpkg (c :: cs) = ignoreMissingIpkg cs
-
-checkVerbose : List CLOpt -> Bool
-checkVerbose [] = False
-checkVerbose (Verbose :: _) = True
-checkVerbose (_ :: xs) = checkVerbose xs
-
-typeOf : {vars : _} -> Term vars -> Maybe RawImp
-typeOf (Ref fc nt name) = Just (IVar fc name)
-typeOf (Meta fc n i ts) = Nothing
-typeOf (Bind fc x b scope) = Nothing
-typeOf (TType fc n) = Nothing
-typeOf (Local fc isLet idx p) = Nothing
-typeOf (App fc fn arg) = Nothing
-typeOf (As fc side as pat) = Nothing
-typeOf (TDelayed fc lz t) = Nothing
-typeOf (TDelay fc lz ty arg) = Nothing
-typeOf (TForce fc lz t) = Nothing
-typeOf (PrimVal fc constant@(PrT _)) = Just (IPrimVal fc constant)
-typeOf (PrimVal fc _) = Nothing
-typeOf (Erased fc why) = Nothing
-
-findWithin : {vars : _} -> (target : Name) -> (ty : Term vars) -> Maybe (List RawImp)
-findWithin t (Ref fc nt name) = if t == name then Just [] else Nothing
-findWithin t (Bind fc x (Let fc1 rig val ty) scope) = findWithin t scope
-findWithin t (Bind fc x (Pi fc1 rig pinfo ty) scope) = 
-  case typeOf ty of
-       Just x => (x ::) <$> findWithin t scope
-       Nothing => findWithin t scope
-findWithin t (App fc fn arg) = findWithin t fn
-findWithin _ _ = Nothing
-
-tTestTypeName : Name
-tTestTypeName =
-  let ttestNS = NS (mkNamespace "TTest")
-  in  ttestNS $ UN $ Basic "==>"
-
-tTestConstructorName : Name
-tTestConstructorName =
-  let ttestNS = NS (mkNamespace "TTest")
-  in  ttestNS $ UN $ Basic "MkTTest"
-
-argsInPropM : {auto c : Ref Ctxt Defs} ->
-              {auto m : Ref MD Metadata} ->
-              {auto u : Ref UST UState} ->
-              {auto s : Ref Syn SyntaxInfo} ->
-              {auto o : Ref ROpts REPLOpts} ->
-              Context ->
-              (testName : String) ->
-              List ClosedTerm ->
-              Core (List ClosedTerm)
-argsInPropM context testName argTypes = for argTypes $ \argTy => do
-  let propertyTestNS = NS (mkNamespace "Hedgehog.Internal.Property")
-  let forAllFnName = propertyTestNS $ UN $ Basic "forAll"
-  tidx <- resolveName (UN $ Basic "[elaborator script]")
-  let propTFn = Ref EmptyFC Func (propertyTestNS $ UN $ Basic "PropertyT")
-  let glued = gnf Env.empty (apply EmptyFC propTFn [argTy])
-  let gen : RawImp = ISearch EmptyFC 100
-  let appGen : RawImp = apply (IVar EmptyFC forAllFnName) [gen]
-  catch (checkTerm tidx InExpr [] (MkNested []) Env.empty appGen glued) $
-    \e => do argTypeNames <- traverse (full context) argTypes
-             coreLift $ putStrLn "Error generating arguments for \{testName}. Needed argument types: \{show argTypeNames}"
-             throw e
-
-record TestArg where
-  constructor MkTestArg
-  ty : ClosedTerm
-  -- ^ argument type
-  gen : ClosedTerm
-  -- ^ PropertyT a (generates an `a` in the PropertyT Monad)
-
-propFn : {auto c : Ref Ctxt Defs} -> RawImp -> Scope -> List TestArg -> Core RawImp
-propFn testFn scope [] = pure (apply eqPropertyFnVar [testFn])
-propFn testFn scope [x] = do
-  -- testFn : a -> x ==> y
-
-  argTy <- iRawToRawImp <$> unelab Env.empty x.ty
-  -- argTy : Type (a in this case)
-  arg <- iRawToRawImp <$> unelab Env.empty x.gen
-  -- arg : PropertyT a
-
-  let ivarOf : Name -> RawImp = IVar EmptyFC
-
-  let argName = mkFresh scope (UN $ Basic "testArg")
-  let lambda : RawImp = ILam EmptyFC 
-                             top
-                             Explicit
-                             (Just argName)
-                             argTy 
-                             (apply eqPropertyFnVar [apply testFn (ivarOf <$> reverse (argName :: scope))])
-  let eqProp : RawImp = apply bindFnVar [arg, lambda]
-  pure eqProp
-
-propFn testFn scope (x :: xs) = do
-  -- testFn : a -> ... -> x ==> y
-
-  argTy <- iRawToRawImp <$> unelab Env.empty x.ty
-  -- argTy : Type (a in this case)
-  arg <- iRawToRawImp <$> unelab Env.empty x.gen
-  -- arg : PropertyT a
-
-  let argName = mkFresh scope (UN $ Basic "testArg")
-  testFn' <- propFn testFn (argName :: scope) xs
-  let lambda : RawImp = ILam EmptyFC
-                             top
-                             Explicit
-                             (Just argName)
-                             argTy
-                             testFn'
-  let eqProp : RawImp = apply bindFnVar [arg, lambda]
-  pure eqProp
-
-handleOpts : {auto c : Ref Ctxt Defs} -> List CLOpt -> Core ()
-handleOpts (SetCG e :: opts)
-    = do defs <- get Ctxt
-         case getCG (options defs) e of
-            Just cg => do setCG cg
-                          handleOpts opts
-            Nothing =>
-              do coreLift $ putStrLn "No such code generator"
-                 coreLift $ putStrLn $ "Code generators available: " ++
-                                 showSep ", " (map fst (availableCGs (options defs)))
-                 coreLift $ exitWith (ExitFailure 1)
-handleOpts (PkgPath p :: opts)
-    = do addPkgDir p anyBounds
-         handleOpts opts
-handleOpts (SourceDir d :: opts)
-    = do setSourceDir (Just d)
-         handleOpts opts
-handleOpts (FindIPKG :: opts)
-    = do setSession ({ findipkg := True } !getSession)
-         handleOpts opts
-handleOpts _ = pure ()
-
 stMain : List CLOpt -> Core ()
 stMain opts
     = do defs <- initDefs
@@ -261,7 +127,10 @@ stMain opts
            update ROpts { mainfile := fname }
 
            s <- newRef PostS defaultPost
-           -- If there's a --build or --install, just do that then quit
+
+           Continue <- handleOpts opts
+              | Abort => pure ()
+
            Continue <- flip catch quitWithError $ processPackageOpts opts
               | Abort => pure ()
 
