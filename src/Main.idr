@@ -57,122 +57,124 @@ findInputs [] = []
 findInputs (InputFile f :: fs) = f :: findInputs fs
 findInputs (_ :: fs) = findInputs fs
 
-stMain : List CLOpt -> Core ()
-stMain opts
-    = do defs <- initDefs
-         c <- newRef Ctxt defs
-         s <- newRef Syn initSyntax
-         setCG {c} Chez
-         addPrimitives
+testsInFile : {auto c : Ref Ctxt Defs} ->
+              {auto s : Ref Syn SyntaxInfo} ->
+              {auto o : Ref ROpts REPLOpts} ->
+              List CLOpt ->
+              (fname : String) -> Core ()
+testsInFile opts fname = do
+  update ROpts { mainfile := Just fname }
 
-         setWorkingDir "."
-         when (ignoreMissingIpkg opts) $
-            setSession ({ ignoreMissingPkg := True } !getSession)
+  s <- newRef PostS defaultPost
 
-         let outmode = REPL InfoLvl
-         o <- newRef ROpts (REPL.Opts.defaultOpts Nothing outmode [])
-         updateEnv
-         let fnames = findInputs opts
+  Continue <- handleOpts opts
+     | Abort => pure ()
 
-         for_ fnames $ \fname => do
-           let fname = Just fname
-           update ROpts { mainfile := fname }
+  Continue <- flip catch quitWithError $ processPackageOpts opts
+     | Abort => pure ()
 
-           s <- newRef PostS defaultPost
+  flip catch quitWithError $
+     do u <- newRef UST initUState
+        origin <- maybe
+          (pure $ Virtual Interactive) (\fname => do
+            modIdent <- ctxtPathToNS fname
+            pure (PhysicalIdrSrc modIdent)
+            ) (Just fname)
+        m <- newRef MD (initMetadata origin)
+        session <- getSession
+        fname <- if findipkg session
+                    then findIpkg (Just fname)
+                    else pure (Just fname)
+        setMainFile fname
+        result <- case fname of
+             Nothing => logTime 1 "Loading prelude" $ do
+                          when (not $ noprelude session) $
+                            readPrelude True
+                          pure Done
+             Just f => logTime 1 "Loading main file" $ do
+                         res <- loadMainFile f
+                         displayStartupErrors res
+                         pure res
 
-           Continue <- handleOpts opts
-              | Abort => pure ()
+        post <- get PostS
+        Continue <- catch (postOptions result post)
+                        (\err => emitError err *> pure Abort)
+         | Abort => do
+             -- exit with an error code if there was an error, otherwise
+             -- just exit
+              ropts <- get ROpts
+              showTimeRecord
+              whenJust (errorLine ropts) $ \ _ =>
+                coreLift $ exitWith (ExitFailure 1)
 
-           Continue <- flip catch quitWithError $ processPackageOpts opts
-              | Abort => pure ()
+        setAllPublic True
+        finalDefs <- get Ctxt
+        let context = finalDefs.gamma
+        targetResolvedName <- resolved context tTestTypeName
+        ctxt <- get Arr @{context.content}
+        for_ (rangeFromTo 0 (max ctxt)) $ \idx => do
+           Just y <- coreLift (readArray ctxt idx)
+             | Nothing => pure ()
+           test <- decode context idx True y
+           let False = test.fullname == tTestConstructorName
+             | True => pure ()
+           let ty = test.type
+           let Just extraArgs = (findWithin targetResolvedName ty)
+             | Nothing => pure ()
+           let testName = show test.fullname
 
-           flip catch quitWithError $
-              do u <- newRef UST initUState
-                 origin <- maybe
-                   (pure $ Virtual Interactive) (\fname => do
-                     modIdent <- ctxtPathToNS fname
-                     pure (PhysicalIdrSrc modIdent)
-                     ) fname
-                 m <- newRef MD (initMetadata origin)
-                 session <- getSession
-                 fname <- if findipkg session
-                             then findIpkg fname
-                             else pure fname
-                 setMainFile fname
-                 result <- case fname of
-                      Nothing => logTime 1 "Loading prelude" $ do
-                                   when (not $ noprelude session) $
-                                     readPrelude True
-                                   pure Done
-                      Just f => logTime 1 "Loading main file" $ do
-                                  res <- loadMainFile f
-                                  displayStartupErrors res
-                                  pure res
-
-                 post <- get PostS
-                 Continue <- catch (postOptions result post)
-                                 (\err => emitError err *> pure Abort)
-                  | Abort => do
-                      -- exit with an error code if there was an error, otherwise
-                      -- just exit
-                       ropts <- get ROpts
-                       showTimeRecord
-                       whenJust (errorLine ropts) $ \ _ =>
-                         coreLift $ exitWith (ExitFailure 1)
-
-                 setAllPublic True
-                 finalDefs <- get Ctxt
-                 let context = finalDefs.gamma
-                 targetResolvedName <- resolved context tTestTypeName
-                 ctxt <- get Arr @{context.content}
-                 for_ (rangeFromTo 0 (max ctxt)) $ \idx => do
-                    Just y <- coreLift (readArray ctxt idx)
-                      | Nothing => pure ()
-                    test <- decode context idx True y
-                    let False = test.fullname == tTestConstructorName
-                      | True => pure ()
-                    let ty = test.type
-                    let Just extraArgs = (findWithin targetResolvedName ty)
-                      | Nothing => pure ()
-                    let testName = show test.fullname
-
-                    argTypes : List ClosedTerm <- for extraArgs $ \arg => do
-                      tidx <- resolveName (UN $ Basic "[elaborator script]")
-                      let glued = gnf Env.empty (TType EmptyFC (UN $ Basic "Type"))
-                      catch (checkTerm tidx InExpr [] (MkNested []) Env.empty arg glued) $
-                        \e => do coreLift $ putStrLn "Error while determining argument types for \{testName}"
-                                 throw e
-                    
-                    argsInProp <- argsInPropM context testName argTypes
-                    -- ^ now we've got List (PropertyT a) for list of arguments
-                    let testArgs = zipWith MkTestArg argTypes argsInProp 
-                    -- ^ zip arg generators and their generated types
-                    
-                    eqProp <- propFn (IVar EmptyFC test.fullname) [] testArgs
-                    -- ^ PropertyT ()
-                    
-                    let propertyTestFn : RawImp = apply propertyTestFnVar [eqProp] 
-                    let taggedTestName : RawImp = apply taggedPropertyVar [IPrimVal EmptyFC (Str testName)]
-                    let propertyCheckFn : RawImp = apply propertyCheckFnVar [taggedTestName, propertyTestFn] 
-                    let performFn : RawImp = apply unsafePerformIOFnVar [propertyCheckFn]
-                    bool <- getCon EmptyFC finalDefs (NS (preludeNS <.> (mkNamespace "Basics")) $ UN $ Basic "Bool")
-                    tidx <- resolveName (UN $ Basic "[elaborator script]")
-                    let glued = (gnf Env.empty bool)
-                    r <- checkTerm tidx InExpr [] (MkNested []) Env.empty performFn glued
-                    Just cg <- findCG
-                      | Nothing => coreLift $ exitWith (ExitFailure 1)
-                    execute cg r
+           argTypes : List ClosedTerm <- for extraArgs $ \arg => do
+             tidx <- resolveName (UN $ Basic "[elaborator script]")
+             let glued = gnf Env.empty (TType EmptyFC (UN $ Basic "Type"))
+             catch (checkTerm tidx InExpr [] (MkNested []) Env.empty arg glued) $
+               \e => do coreLift $ putStrLn "Error while determining argument types for \{testName}"
+                        throw e
+           
+           argsInProp <- argsInPropM context testName argTypes
+           -- ^ now we've got List (PropertyT a) for list of arguments
+           let testArgs = zipWith MkTestArg argTypes argsInProp 
+           -- ^ zip arg generators and their generated types
+           
+           eqProp <- propFn (IVar EmptyFC test.fullname) [] testArgs
+           -- ^ PropertyT ()
+           
+           let propertyTestFn : RawImp = apply propertyTestFnVar [eqProp] 
+           let taggedTestName : RawImp = apply taggedPropertyVar [IPrimVal EmptyFC (Str testName)]
+           let propertyCheckFn : RawImp = apply propertyCheckFnVar [taggedTestName, propertyTestFn] 
+           let performFn : RawImp = apply unsafePerformIOFnVar [propertyCheckFn]
+           bool <- getCon EmptyFC finalDefs (NS (preludeNS <.> (mkNamespace "Basics")) $ UN $ Basic "Bool")
+           tidx <- resolveName (UN $ Basic "[elaborator script]")
+           let glued = (gnf Env.empty bool)
+           r <- checkTerm tidx InExpr [] (MkNested []) Env.empty performFn glued
+           Just cg <- findCG
+             | Nothing => coreLift $ exitWith (ExitFailure 1)
+           execute cg r
 
   where
+    quitWithError : Error -> Core a
+    quitWithError err = do
+      doc <- display err
+      msg <- render doc
+      coreLift (die msg)
 
-  quitWithError : {auto c : Ref Ctxt Defs} ->
-                {auto s : Ref Syn SyntaxInfo} ->
-                {auto o : Ref ROpts REPLOpts} ->
-                Error -> Core a
-  quitWithError err = do
-    doc <- display err
-    msg <- render doc
-    coreLift (die msg)
+stMain : List CLOpt -> Core ()
+stMain opts = do 
+  defs <- initDefs
+  c <- newRef Ctxt defs
+  s <- newRef Syn initSyntax
+  setCG {c} Chez
+  addPrimitives
+
+  setWorkingDir "."
+  when (ignoreMissingIpkg opts) $
+     setSession ({ ignoreMissingPkg := True } !getSession)
+
+  let outmode = REPL InfoLvl
+  o <- newRef ROpts (REPL.Opts.defaultOpts Nothing outmode [])
+  updateEnv
+  let fnames = findInputs opts
+
+  for_ fnames (testsInFile opts)
 
 -- There are three ways to run the compiler
 -- Either run normally, or run in yaffle mode, or dump TTM
