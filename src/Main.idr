@@ -260,7 +260,10 @@ stMain opts
            let fname = Just fname
            update ROpts { mainfile := fname }
 
-           handleOpts opts
+           s <- newRef PostS defaultPost
+           -- If there's a --build or --install, just do that then quit
+           Continue <- flip catch quitWithError $ processPackageOpts opts
+              | Abort => pure ()
 
            flip catch quitWithError $
               do u <- newRef UST initUState
@@ -285,8 +288,16 @@ stMain opts
                                   displayStartupErrors res
                                   pure res
 
-                 ignore $ catch (postOptions result opts)
-                                (\err => emitError err *> pure False)
+                 post <- get PostS
+                 Continue <- catch (postOptions result post)
+                                 (\err => emitError err *> pure Abort)
+                  | Abort => do
+                      -- exit with an error code if there was an error, otherwise
+                      -- just exit
+                       ropts <- get ROpts
+                       showTimeRecord
+                       whenJust (errorLine ropts) $ \ _ =>
+                         coreLift $ exitWith (ExitFailure 1)
 
                  setAllPublic True
                  finalDefs <- get Ctxt
@@ -342,8 +353,34 @@ stMain opts
     msg <- render doc
     coreLift (die msg)
 
--- Run any options (such as --version or --help) which imply printing a
--- message then exiting. Returns wheter the program should continue
+-- There are three ways to run the compiler
+-- Either run normally, or run in yaffle mode, or dump TTM
+data Entrypoint
+  = Normal (List CLOpt)
+  | Yaffle String
+  | TTM String
+
+parameters (allOpts : List CLOpt)
+
+  -- Yaffle and TTM are mutually incompatible so we parse the flags here and
+  -- report the error if it occurs. If neither flag is present we run in normal mode
+
+  parseCompilerMode' : List CLOpt -> Maybe Entrypoint -> Either String Entrypoint
+  parseCompilerMode' [] Nothing = pure $ Normal allOpts
+  parseCompilerMode' [] (Just m) = pure m
+  parseCompilerMode' (Yaffle f :: xs) Nothing = parseCompilerMode' xs (Just $ Yaffle f)
+  parseCompilerMode' (Metadata f :: xs) Nothing = parseCompilerMode' xs (Just $ TTM f)
+  parseCompilerMode' (Yaffle _ :: xs) (Just (TTM _)) = Left "Incompatible modes --ttm and --yaffle"
+  parseCompilerMode' (Metadata _ :: xs) (Just (Yaffle _)) = Left "Incompatible modes --ttm and --yaffle"
+  parseCompilerMode' (_ :: xs) m = parseCompilerMode' xs m
+
+  parseCompilerMode : Either String Entrypoint
+  parseCompilerMode = parseCompilerMode' allOpts Nothing
+
+allMain : Entrypoint -> Core ()
+allMain (Normal opts) = stMain opts
+allMain (Yaffle f) = pure ()
+allMain (TTM f) = pure ()
 
 main : IO ()
 main = do
@@ -352,7 +389,10 @@ main = do
                      exitWith (ExitFailure 1)
   
   setupTerm
-  coreRun (stMain opts)
+  let Right cliMode = parseCompilerMode opts
+    | Left err => do ignore $ fPutStrLn stderr $ "Error: " ++ err
+                     exitWith (ExitFailure 1)
+  coreRun (allMain cliMode)
     (\err : Error => do ignore $ fPutStrLn stderr $ "Uncaught error: " ++ show err
                         exitWith (ExitFailure 1))
     (\res => pure ())
