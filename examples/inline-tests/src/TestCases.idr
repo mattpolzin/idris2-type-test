@@ -3,6 +3,7 @@ module TestCases
 import TTest
 import Hedgehog
 import System
+import Data.String
 
 compareAssignees : (githubUser : Maybe String) -> (assignee1 : Maybe String) -> (assignee2 : Maybe String) -> Ordering
 compareAssignees Nothing _ _ = EQ
@@ -54,4 +55,7 @@ namespace Tests1
 
 good_test5 : (x : Nat) -> x + 2 > 1 ==> True
 good_test5 x = MkTTest
+
+good_test6 : String.unlines ["hi", "hello"] ==> "hi\nhello\n"
+good_test6 = MkTTest
 

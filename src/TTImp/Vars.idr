@@ -4,6 +4,12 @@ import TTImp.TTImp
 import Core.Name
 import Core.FC
 
+tTestNS : Name -> Name
+tTestNS = NS (mkNamespace "TTest")
+
+propertyTestNS : Name -> Name
+propertyTestNS = NS (mkNamespace "Hedgehog.Internal.Property")
+
 export
 bindFnVar : RawImp
 bindFnVar =
@@ -19,8 +25,7 @@ mapFnVar =
 export
 taggedPropertyVar : RawImp
 taggedPropertyVar = 
-  let propertyTestNS = NS (mkNamespace "Hedgehog.Internal.Property")
-      taggedPropertyName = propertyTestNS $ UN $ Basic "MkTagged"
+  let taggedPropertyName = propertyTestNS $ UN $ Basic "MkTagged"
   in  (IVar EmptyFC taggedPropertyName)
 
 export
@@ -30,18 +35,24 @@ propertyCheckFnVar =
       propertyCheckFnName = propertyTestRunnerNS $ UN $ Basic "checkNamed"
   in  (IVar EmptyFC propertyCheckFnName)
 
+||| property : PropertyT () -> Property
 export
 propertyTestFnVar : RawImp
 propertyTestFnVar =
-  let propertyTestNS = NS (mkNamespace "Hedgehog.Internal.Property")
-      propertyTestFnName = propertyTestNS $ UN $ Basic "property"
+  let propertyTestFnName = propertyTestNS $ UN $ Basic "property"
+  in  (IVar EmptyFC propertyTestFnName)
+
+||| property1 : PropertyT () -> Property
+export
+property1TestFnVar : RawImp
+property1TestFnVar =
+  let propertyTestFnName = propertyTestNS $ UN $ Basic "property1"
   in  (IVar EmptyFC propertyTestFnName)
 
 export
 eqPropertyFnVar : RawImp
 eqPropertyFnVar =
-  let ttestNS = NS (mkNamespace "TTest")
-      eqPropertyFnName = ttestNS $ UN $ Basic "EqProperty"
+  let eqPropertyFnName = tTestNS $ UN $ Basic "EqProperty"
   in  (IVar EmptyFC eqPropertyFnName)
 
 export

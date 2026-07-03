@@ -135,12 +135,11 @@ testsInFile opts fname = do
            let testArgs = zipWith MkTestArg argTypes argsInProp 
            -- ^ zip arg generators and their generated types
            
-           eqProp <- propFn (IVar EmptyFC test.fullname) [] testArgs
-           -- ^ PropertyT ()
+           propertyTest <- prop (IVar EmptyFC test.fullname) [] testArgs
+           -- ^ Property
            
-           let propertyTestFn : RawImp = apply propertyTestFnVar [eqProp] 
            let taggedTestName : RawImp = apply taggedPropertyVar [IPrimVal EmptyFC (Str testName)]
-           let propertyCheckFn : RawImp = apply propertyCheckFnVar [taggedTestName, propertyTestFn] 
+           let propertyCheckFn : RawImp = apply propertyCheckFnVar [taggedTestName, propertyTest] 
            let performFn : RawImp = apply unsafePerformIOFnVar [propertyCheckFn]
            bool <- getCon EmptyFC finalDefs (NS (preludeNS <.> (mkNamespace "Basics")) $ UN $ Basic "Bool")
            tidx <- resolveName (UN $ Basic "[elaborator script]")

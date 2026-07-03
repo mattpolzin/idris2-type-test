@@ -67,6 +67,9 @@ record TestArg where
   gen : ClosedTerm
   -- ^ PropertyT a (generates an `a` in the PropertyT Monad)
 
+||| Takes an unapplied test function and list of arguments and folds the test
+||| function into a PropertyT by generating each argument in the PropertyT
+||| monad. You get back both the PropertyT and a PropertyConfig.
 export
 propFn : {auto c : Ref Ctxt Defs} -> (testFn : RawImp) -> Scope -> List TestArg -> Core RawImp
 propFn testFn scope [] = pure (apply eqPropertyFnVar [testFn])
@@ -109,4 +112,18 @@ propFn testFn scope (x :: xs) = do
       let lambda = lambdaFn argTy argName testFn'
 
       pure $ eqProp arg lambda
+
+||| Like PropFn but gives back a Property instead of a PropertyT ()
+|||
+||| For tests that have no inputs, creates a property that runs 1 test
+||| iteration. For tests with at least one input, creates a property that runs
+||| 100 test iterations.
+export
+prop :  {auto c : Ref Ctxt Defs} -> (testFn : RawImp) -> Scope -> List TestArg -> Core RawImp
+prop testFn scope [] = do
+  prop <- propFn testFn scope []
+  pure $ apply property1TestFnVar [prop]
+prop testFn scope args = do
+  prop <- propFn testFn scope args 
+  pure $ apply propertyTestFnVar [prop]
 
