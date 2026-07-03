@@ -145,7 +145,9 @@ testsInFile opts fname = do
            bool <- getCon EmptyFC finalDefs (NS (preludeNS <.> (mkNamespace "Basics")) $ UN $ Basic "Bool")
            tidx <- resolveName (UN $ Basic "[elaborator script]")
            let glued = (gnf Env.empty bool)
-           r <- checkTerm tidx InExpr [] (MkNested []) Env.empty performFn glued
+           r <- catch (checkTerm tidx InExpr [] (MkNested []) Env.empty performFn glued) $
+             \e => do coreLift $ putStrLn "Error generating \{testName}"
+                      throw e
            Just cg <- findCG
              | Nothing => coreLift $ exitWith (ExitFailure 1)
            execute cg r
