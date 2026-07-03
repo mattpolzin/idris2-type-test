@@ -18,18 +18,24 @@ import TTImp.Unelab
 import TTImp.Raw
 import TTImp.Vars
 
+tTestNS : Name -> Name
+tTestNS = NS (mkNamespace "TTest")
+
 export
 tTestTypeName : Name
-tTestTypeName =
-  let ttestNS = NS (mkNamespace "TTest")
-  in  ttestNS $ UN $ Basic "==>"
+tTestTypeName = tTestNS $ UN $ Basic "==>"
 
 export
 tTestConstructorName : Name
-tTestConstructorName =
-  let ttestNS = NS (mkNamespace "TTest")
-  in  ttestNS $ UN $ Basic "MkTTest"
+tTestConstructorName = tTestNS $ UN $ Basic "MkTTest"
 
+||| Take a list of argument types (types of arguments to the property being
+||| tested) and turn it into a list of expressions of those types under
+||| PropertyT by using Gens (generators) located by searching the context.
+|||
+||| In the TTest `(x : String) -> x ==> x`, the arg types will be (as closed
+||| terms) `[String]` and the return of this function will be of type
+||| `[PropertyT String]`
 export
 argsInPropM : {auto c : Ref Ctxt Defs} ->
               {auto m : Ref MD Metadata} ->
@@ -38,7 +44,7 @@ argsInPropM : {auto c : Ref Ctxt Defs} ->
               {auto o : Ref ROpts REPLOpts} ->
               Context ->
               (testName : String) ->
-              List ClosedTerm ->
+              (argTypes : List ClosedTerm) ->
               Core (List ClosedTerm)
 argsInPropM context testName argTypes = for argTypes $ \argTy => do
   let propertyTestNS = NS (mkNamespace "Hedgehog.Internal.Property")
@@ -62,44 +68,45 @@ record TestArg where
   -- ^ PropertyT a (generates an `a` in the PropertyT Monad)
 
 export
-propFn : {auto c : Ref Ctxt Defs} -> RawImp -> Scope -> List TestArg -> Core RawImp
+propFn : {auto c : Ref Ctxt Defs} -> (testFn : RawImp) -> Scope -> List TestArg -> Core RawImp
 propFn testFn scope [] = pure (apply eqPropertyFnVar [testFn])
-propFn testFn scope [x] = do
-  -- testFn : a -> x ==> y
-
-  argTy <- iRawToRawImp <$> unelab Env.empty x.ty
-  -- argTy : Type (a in this case)
-  arg <- iRawToRawImp <$> unelab Env.empty x.gen
-  -- arg : PropertyT a
-
-  let ivarOf : Name -> RawImp = IVar EmptyFC
-
-  let argName = mkFresh scope (UN $ Basic "testArg")
-  let lambda : RawImp = ILam EmptyFC 
-                             top
-                             Explicit
-                             (Just argName)
-                             argTy 
-                             (apply eqPropertyFnVar [apply testFn (ivarOf <$> reverse (argName :: scope))])
-  let eqProp : RawImp = apply bindFnVar [arg, lambda]
-  pure eqProp
-
 propFn testFn scope (x :: xs) = do
-  -- testFn : a -> ... -> x ==> y
-
   argTy <- iRawToRawImp <$> unelab Env.empty x.ty
   -- argTy : Type (a in this case)
   arg <- iRawToRawImp <$> unelab Env.empty x.gen
   -- arg : PropertyT a
 
   let argName = mkFresh scope (UN $ Basic "testArg")
-  testFn' <- propFn testFn (argName :: scope) xs
-  let lambda : RawImp = ILam EmptyFC
-                             top
-                             Explicit
-                             (Just argName)
-                             argTy
-                             testFn'
-  let eqProp : RawImp = apply bindFnVar [arg, lambda]
-  pure eqProp
+
+  go argTy arg argName xs
+
+  where
+    lambdaFn : (argTy : RawImp) -> (argName : Name) -> (testFn' : RawImp) -> RawImp
+    lambdaFn argTy argName testFn' =
+      ILam EmptyFC 
+           top
+           Explicit
+           (Just argName)
+           argTy 
+           testFn'
+
+    eqProp : (arg : RawImp) -> (lambda : RawImp) -> RawImp
+    eqProp arg lambda = apply bindFnVar [arg, lambda]
+
+    go : (argTy : RawImp) -> (arg : RawImp) -> (argName : Name) -> (additionalArgs : List TestArg) -> Core RawImp
+    go argTy arg argName [] = do
+      -- testFn : a -> x ==> y
+
+      testFn' <- propFn (apply testFn (IVar EmptyFC <$> reverse (argName :: scope))) [] []
+      let lambda  = lambdaFn argTy argName testFn'
+
+      pure $ eqProp arg lambda
+
+    go argTy arg argName xs = do
+      -- testFn : a -> ... -> x ==> y
+
+      testFn' <- propFn testFn (argName :: scope) xs
+      let lambda = lambdaFn argTy argName testFn'
+
+      pure $ eqProp arg lambda
 
